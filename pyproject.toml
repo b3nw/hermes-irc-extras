@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-irc-extras"
+version = "0.1.0"
+description = "Hermes Agent plugin: Additional features and security extensions for the IRC relay (unverified SSL, SASL)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "b3nw", email = "b3nw@duck.com" }]
+keywords = ["hermes-agent", "plugin", "irc", "relay", "ssl", "sasl"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+
+dependencies = []
+
+[project.optional-dependencies]
+# pyyaml is not a runtime dependency of this plugin; the integration tests import
+# the core hermes-agent modules, which require it.
+dev = ["pytest>=7", "pytest-asyncio>=0.21", "pytest-timeout>=2", "ruff>=0.4", "pyyaml>=6"]
+
+[project.entry-points."hermes_agent.plugins"]
+irc_extras = "hermes_irc_extras"
+
+[tool.setuptools]
+packages = ["hermes_irc_extras"]
+
+[tool.setuptools.package-data]
+hermes_irc_extras = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

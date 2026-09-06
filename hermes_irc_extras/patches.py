@@ -68,33 +68,51 @@ def _inject_metadata_declarations() -> None:
 
 
 def _apply_irc_patches() -> None:
-    """Surgically apply patches to the plugins.platforms.irc.adapter module."""
+    """Surgically apply patches to the IRC adapter module(s)."""
     global _patched
     if _patched:
         return
 
+    target_mods = []
+    # Check if loaded under hermes_plugins namespace
+    if "hermes_plugins.irc_platform.adapter" in sys.modules:
+        target_mods.append(sys.modules["hermes_plugins.irc_platform.adapter"])
+
     try:
-        # Import the target module
         import plugins.platforms.irc.adapter as adapter_mod
+        if adapter_mod not in target_mods:
+            target_mods.append(adapter_mod)
     except Exception:
+        pass
+
+    for mod in list(sys.modules.values()):
+        name = getattr(mod, "__name__", "")
+        if name and (name.endswith("irc_platform.adapter") or name.endswith("platforms.irc.adapter")):
+            if mod not in target_mods:
+                target_mods.append(mod)
+
+    if not target_mods:
         logger.warning(
-            "hermes-irc-extras: Could not import plugins.platforms.irc.adapter", exc_info=True
+            "hermes-irc-extras: Could not locate IRC adapter module"
         )
         return
 
-    logger.debug("hermes-irc-extras: Applying lazy patches to IRC adapter")
+    logger.debug("hermes-irc-extras: Applying lazy patches to %d IRC adapter module(s)", len(target_mods))
 
-    try:
-        _patch_adapter_module(adapter_mod)
-    except Exception:
-        logger.warning(
-            "hermes-irc-extras: Failed to apply IRC adapter patches; "
-            "the plugin is inactive for this process",
-            exc_info=True,
-        )
-        return
+    patched_any = False
+    for mod in target_mods:
+        try:
+            _patch_adapter_module(mod)
+            patched_any = True
+        except Exception:
+            logger.warning(
+                "hermes-irc-extras: Failed to apply IRC adapter patches to %s",
+                getattr(mod, "__name__", "unknown"),
+                exc_info=True,
+            )
 
-    _patched = True
+    if patched_any:
+        _patched = True
 
 
 def _patch_adapter_module(adapter_mod: Any) -> None:

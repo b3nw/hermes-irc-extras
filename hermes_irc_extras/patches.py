@@ -26,6 +26,14 @@ logger = logging.getLogger(__name__)
 _patched = False
 _warned = False
 
+#: The host registration context and whether the log tools were already
+#: registered with it, remembered by :func:`note_plugin_context`. Channel
+#: logging can be enabled in ``config.yaml`` alone, and the adapter's config —
+#: the authoritative source for that — only exists long after the plugin was
+#: loaded, so the tools may have to be registered late.
+_plugin_ctx: Any = None
+_log_tools_registered = False
+
 #: Minimum wall-clock gap between opportunistic retention prunes, per adapter.
 _PRUNE_INTERVAL_SECONDS = 3600.0
 
@@ -62,6 +70,19 @@ def apply_patches() -> bool:
     return True
 
 
+def note_plugin_context(ctx: Any, registered: bool) -> None:
+    """Remember the host context and whether the log tools went on it.
+
+    Called once by :func:`hermes_irc_extras.register`. Keeping the context
+    lets an adapter that turns out to have channel logging enabled — in
+    ``config.yaml``, which the plugin loader could not see — still expose the
+    query tools instead of logging into a database nothing can read.
+    """
+    global _plugin_ctx, _log_tools_registered
+    _plugin_ctx = ctx
+    _log_tools_registered = bool(registered)
+
+
 #: Env vars this plugin contributes to the WebUI / Desktop UI config surface.
 _OPTIONAL_ENV_VAR_METADATA: dict[str, dict[str, Any]] = {
     "IRC_ALLOW_INVALID_SSL": {
@@ -80,11 +101,14 @@ _OPTIONAL_ENV_VAR_METADATA: dict[str, dict[str, Any]] = {
         "description": (
             "Passively log all IRC channel messages to a local SQLite database "
             "(true/false), including messages that are not addressed to the bot "
-            "and messages from users outside IRC_ALLOWED_USERS. Unaddressed "
-            "traffic is still never answered and costs no agent turns; the log "
-            "is only readable via the search_irc_logs and get_channel_history "
-            "tools. Records third parties' chat — check local expectations "
-            "before enabling. Default: false."
+            "and messages from users outside IRC_ALLOWED_USERS. Direct messages "
+            "to the bot are logged too, and every record keeps the sender's nick "
+            "and user@host (their hostname or cloak) alongside the message text. "
+            "Unaddressed traffic is still never answered and costs no agent "
+            "turns; the log is only readable via the search_irc_logs and "
+            "get_channel_history tools. Records third parties' chat and "
+            "identifying metadata — check local expectations, and any network "
+            "or data-protection policy, before enabling. Default: false."
         ),
         "prompt": "Passively log IRC channel messages to SQLite (true/false)",
         "url": None,
@@ -94,7 +118,9 @@ _OPTIONAL_ENV_VAR_METADATA: dict[str, dict[str, Any]] = {
     },
     "IRC_CHANNEL_LOG_DB_PATH": {
         "description": (
-            "Absolute path to the IRC channel log SQLite database. "
+            "Absolute path to the IRC channel log SQLite database. Holds "
+            "channel and direct-message text plus each sender's user@host; new "
+            "database files are created with owner-only (0600) permissions. "
             "Default: {profile}/state/irc_channel_logs.db."
         ),
         "prompt": "IRC channel log database path (blank for default)",
@@ -105,8 +131,9 @@ _OPTIONAL_ENV_VAR_METADATA: dict[str, dict[str, Any]] = {
     },
     "IRC_CHANNEL_LOG_RETENTION_DAYS": {
         "description": (
-            "Days of IRC channel scrollback to retain; older records are pruned "
-            "automatically. Use 0 to keep everything. Default: 14."
+            "Days of IRC channel and direct-message scrollback to retain; older "
+            "records (message text and sender user@host alike) are pruned "
+            "automatically. Use 0 to keep everything forever. Default: 14."
         ),
         "prompt": "IRC channel log retention in days",
         "url": None,
@@ -356,7 +383,11 @@ def _init_channel_logging(adapter: Any, extra: dict[str, Any]) -> None:
     """Resolve and stash this adapter's channel-logging settings.
 
     Resolution happens once per adapter (env first, then ``config.yaml``) so
-    the per-line hot path is a single attribute read. Failure here leaves
+    the per-line hot path is a single attribute read. The resolved values are
+    then published to the shared plugin state and, if the tools were not
+    registered at load time, registered now — the adapter's config is the one
+    authoritative view of a YAML-only setup, and without this the gateway
+    would write a log the agent has no tool to read. Failure here leaves
     logging off rather than breaking adapter construction.
     """
     adapter._irc_extras_logging = False
@@ -367,10 +398,19 @@ def _init_channel_logging(adapter: Any, extra: dict[str, Any]) -> None:
         from . import storage
 
         if not storage.logging_enabled(extra):
+            storage.reset_shared_config()
             return
         adapter._irc_extras_logging = True
         adapter._irc_extras_db_path = storage.resolve_db_path(extra)
         adapter._irc_extras_retention_days = storage.resolve_retention_days(extra)
+        storage.set_shared_config(
+            {
+                "enable_channel_logging": True,
+                "channel_log_db_path": str(adapter._irc_extras_db_path),
+                "channel_log_retention_days": adapter._irc_extras_retention_days,
+            }
+        )
+        _register_log_tools(extra)
         logger.info(
             "hermes-irc-extras: IRC channel logging enabled (db=%s, retention=%sd)",
             adapter._irc_extras_db_path,
@@ -381,6 +421,25 @@ def _init_channel_logging(adapter: Any, extra: dict[str, Any]) -> None:
         logger.warning(
             "hermes-irc-extras: could not initialize channel logging; it stays disabled",
             exc_info=True,
+        )
+
+
+def _register_log_tools(extra: dict[str, Any]) -> None:
+    """Register the query tools for an adapter that enabled logging in YAML.
+
+    A no-op when the plugin loader already registered them (the env-var case)
+    or when the host gave us no context to register with.
+    """
+    global _log_tools_registered
+    if _log_tools_registered or _plugin_ctx is None:
+        return
+    try:
+        from .tools import register_tools
+
+        _log_tools_registered = register_tools(_plugin_ctx, extra)
+    except Exception:
+        logger.warning(
+            "hermes-irc-extras: could not register IRC channel log tools", exc_info=True
         )
 
 

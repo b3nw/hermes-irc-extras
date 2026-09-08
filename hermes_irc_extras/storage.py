@@ -92,6 +92,21 @@ _FTS_STATEMENTS: tuple[str, ...] = (
 _TRUTHY = {"1", "true", "yes", "on"}
 _FALSY = {"0", "false", "no", "off"}
 
+#: Where an ``irc`` platform block may live in ``config.yaml``, lowest
+#: precedence first — the same three locations, in the same "later wins"
+#: order, that the host's ``gateway/config_loader.merge_platform_sections``
+#: merges.
+_YAML_IRC_BLOCKS: tuple[tuple[str, ...], ...] = (
+    ("gateway", "platforms", "irc"),
+    ("platforms", "irc"),
+    ("gateway", "irc"),
+)
+
+#: The adapter-resolved IRC ``extra`` block, published by the ingestion patch
+#: (:func:`set_shared_config`) so callers that hold no ``PlatformConfig`` —
+#: every agent tool handler — resolve the same settings ingestion writes with.
+_shared_config: dict[str, Any] | None = None
+
 
 # ---------------------------------------------------------------------------
 # Configuration resolution (shared by the ingestion patch and the agent tools)
@@ -113,6 +128,74 @@ def _as_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
+def set_shared_config(extra: dict[str, Any] | None) -> None:
+    """Publish the resolved IRC ``extra`` block for callers without a config.
+
+    The agent's tool handlers are reached without a ``PlatformConfig`` in
+    hand, so without this they would resolve from the environment only and a
+    ``config.yaml``-only database path would stay invisible to them.
+    """
+    global _shared_config
+    _shared_config = dict(extra) if extra else {}
+
+
+def reset_shared_config() -> None:
+    """Forget the published block (a re-configured adapter, or a test)."""
+    global _shared_config
+    _shared_config = None
+
+
+def _dig(data: Any, keys: tuple[str, ...]) -> Any:
+    """Walk nested mappings, returning None as soon as the path breaks."""
+    for key in keys:
+        if not isinstance(data, dict):
+            return None
+        data = data.get(key)
+    return data
+
+
+def _load_yaml_extra() -> dict[str, Any]:
+    """Read ``gateway.platforms.irc.extra`` from the active profile's config.
+
+    Read on demand rather than cached: tool calls are rare, and an operator
+    who edits ``config.yaml`` should not be answered from a stale copy. Every
+    failure mode (no file, no PyYAML, malformed YAML) yields ``{}``, so the
+    caller falls back to its own default and logging stays off.
+    """
+    path = _hermes_home() / "config.yaml"
+    try:
+        import yaml
+
+        with path.open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle)
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        logger.debug("hermes-irc-extras: could not read %s", path, exc_info=True)
+        return {}
+
+    merged: dict[str, Any] = {}
+    for keys in _YAML_IRC_BLOCKS:
+        block = _dig(data, keys)
+        if isinstance(block, dict) and isinstance(block.get("extra"), dict):
+            merged.update(block["extra"])
+    return merged
+
+
+def _effective_extra(extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return the ``extra`` mapping the environment falls back to.
+
+    A caller that supplies one (the ingestion patch, holding the adapter's own
+    ``PlatformConfig.extra``) is taken at its word. Callers that supply none
+    get ``config.yaml`` on top of whatever the ingestion patch published,
+    which is what makes YAML-only configuration work end to end: the tools are
+    registered and they read the same database the gateway is writing.
+    """
+    if extra is not None:
+        return extra
+    return {**(_shared_config or {}), **_load_yaml_extra()}
+
+
 def logging_enabled(extra: dict[str, Any] | None = None) -> bool:
     """Return True when channel logging is switched on.
 
@@ -122,7 +205,8 @@ def logging_enabled(extra: dict[str, Any] | None = None) -> bool:
     env = (os.getenv("IRC_ENABLE_CHANNEL_LOGGING") or "").strip()
     if env:
         return _as_bool(env, default=False)
-    return _as_bool((extra or {}).get("enable_channel_logging"), default=False)
+    extra = _effective_extra(extra)
+    return _as_bool(extra.get("enable_channel_logging"), default=False)
 
 
 def default_db_path() -> Path:
@@ -146,7 +230,7 @@ def resolve_db_path(extra: dict[str, Any] | None = None) -> Path:
     env = (os.getenv("IRC_CHANNEL_LOG_DB_PATH") or "").strip()
     if env:
         return Path(env).expanduser()
-    configured = (extra or {}).get("channel_log_db_path")
+    configured = _effective_extra(extra).get("channel_log_db_path")
     if isinstance(configured, str) and configured.strip():
         return Path(configured.strip()).expanduser()
     return default_db_path()
@@ -156,7 +240,7 @@ def resolve_retention_days(extra: dict[str, Any] | None = None) -> float:
     """Resolve the retention window in days (``<= 0`` disables pruning)."""
     raw: Any = (os.getenv("IRC_CHANNEL_LOG_RETENTION_DAYS") or "").strip()
     if not raw:
-        raw = (extra or {}).get("channel_log_retention_days")
+        raw = _effective_extra(extra).get("channel_log_retention_days")
     if raw is None or (isinstance(raw, str) and not raw.strip()):
         return float(DEFAULT_RETENTION_DAYS)
     try:
@@ -183,8 +267,10 @@ def _connect(
     empty database — read paths must never bring the log into existence.
     """
     path = Path(db_path)
+    created = False
     if create:
         path.parent.mkdir(parents=True, exist_ok=True)
+        created = _create_private(path)
     elif not path.exists():
         yield None  # type: ignore[misc]
         return
@@ -195,10 +281,47 @@ def _connect(
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
         _ensure_schema(conn)
+        if created:
+            _tighten_companions(path)
         yield conn
         conn.commit()
     finally:
         conn.close()
+
+
+def _create_private(path: Path) -> bool:
+    """Create a missing log database with 0600; report whether we made it.
+
+    The log holds other people's conversations, so its mode must not be left
+    to the process umask (0644 on many hosts publishes it to every local
+    account). Creating the file ourselves with ``O_EXCL`` closes the window in
+    which sqlite would create it world-readable. Best-effort: a filesystem
+    without POSIX modes simply keeps whatever it gives us.
+    """
+    try:
+        os.close(os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+        return True
+    except FileExistsError:
+        return False
+    except OSError:
+        logger.debug(
+            "hermes-irc-extras: could not create %s with 0600 permissions", path, exc_info=True
+        )
+        return False
+
+
+def _tighten_companions(path: Path) -> None:
+    """Best-effort 0600 on the ``-wal``/``-shm`` sidecars next to a new database.
+
+    SQLite copies the database file's mode onto the sidecars it creates, so
+    this only matters on builds/filesystems where it does not; a missing
+    sidecar (or a platform without chmod) is not an error.
+    """
+    for suffix in ("-wal", "-shm"):
+        try:
+            os.chmod(str(path) + suffix, 0o600)
+        except OSError:
+            pass
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:

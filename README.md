@@ -63,9 +63,15 @@ gateway:
 ```
 
 ⚠️ **This records other people's conversations.** Enabling it logs every message in the
-channels the bot sits in, including from users who cannot instruct the agent at all. Check
-local expectations and any network policy before turning it on. Nothing is written while
-the flag is off — the database is not even created.
+channels the bot sits in, including from users who cannot instruct the agent at all — and
+every direct message sent to the bot. Each row keeps the sender's nick and their
+`user@host` (their hostname or cloak) next to the message text, the channel and the
+timestamp; direct messages are filed under the sender's nick and are readable through the
+same two tools. Old rows are pruned on the retention schedule above, and a new database
+file is created with owner-only (`0600`) permissions — but any account that can read the
+profile directory can still read the log. Check local expectations, any network policy and
+any data-protection obligation before turning it on. Nothing is written while the flag is
+off — the database is not even created.
 
 ⚠️ **Log contents are untrusted input.** Tool results are framed in the host's
 `<untrusted_tool_result>` data boundary (with the boundary token defanged inside the

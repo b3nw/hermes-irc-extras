@@ -16,6 +16,7 @@ sys.path.insert(0, str(REPO_ROOT))
 # Override with HERMES_AGENT_REPO; the defaults below just keep this host working.
 _DEFAULT_HERMES_AGENT_REPOS = (
     "/opt/data/workspace/developer/projects/hermes/hermes-agent/repo",
+    "/workspace/projects/3p/hermes/hermes-agent",
     "/opt/data/workspace/developer/projects/hermes/hermes-agent/"
     "worktrees/feat-hermes-irc-extras",
 )

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-irc-extras"
-version = "0.1.0"
+version = "0.2.0"
 description = "Hermes Agent plugin: Additional features and security extensions for the IRC relay (unverified SSL, SASL)."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -34,6 +34,12 @@ dev = ["pytest>=7", "pytest-asyncio>=0.21", "pytest-timeout>=2", "ruff>=0.4", "p
 
 [project.entry-points."hermes_agent.plugins"]
 irc_extras = "hermes_irc_extras"
+
+[project.urls]
+Homepage = "https://github.com/b3nw/hermes-irc-extras"
+Repository = "https://github.com/b3nw/hermes-irc-extras"
+Issues = "https://github.com/b3nw/hermes-irc-extras/issues"
+Changelog = "https://github.com/b3nw/hermes-irc-extras/blob/main/CHANGELOG.md"
 
 [tool.setuptools]
 packages = ["hermes_irc_extras"]

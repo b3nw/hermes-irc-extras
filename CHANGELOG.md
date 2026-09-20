@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-20
+
 ### Added
 - Opt-in passive channel logging (`IRC_ENABLE_CHANNEL_LOGGING`, default `false`): every IRC `PRIVMSG` is recorded to a local SQLite database ahead of the adapter's addressing and authorization gates, so unaddressed and unauthorized messages are logged without spending an agent turn or an LLM call.
 - Added `search_irc_logs` and `get_channel_history` agent tools (registered only while logging is enabled) for FTS5 keyword search and chronological scrollback, with channel/nick/time-window filters.
